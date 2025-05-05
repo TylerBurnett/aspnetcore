@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Linq;
 using System.Security.Claims;
@@ -19,6 +20,8 @@ namespace Microsoft.AspNetCore.Authentication.JwtBearer;
 /// </summary>
 public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
 {
+    private const string BearerPrefix = "Bearer ";
+
     /// <summary>
     /// Initializes a new instance of <see cref="JwtBearerHandler"/>.
     /// </summary>
@@ -55,7 +58,6 @@ public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
     /// <returns></returns>
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
     {
-        string? token;
         try
         {
             // Give application opportunity to find from a different location, adjust, or reject token
@@ -69,7 +71,7 @@ public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
             }
 
             // If application retrieved token from somewhere else, use that.
-            token = messageReceivedContext.Token;
+            var token = messageReceivedContext.Token;
 
             if (string.IsNullOrEmpty(token))
             {
@@ -81,9 +83,9 @@ public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
                     return AuthenticateResult.NoResult();
                 }
 
-                if (authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                if (authorization.StartsWith(BearerPrefix, StringComparison.OrdinalIgnoreCase))
                 {
-                    token = authorization.Substring("Bearer ".Length).Trim();
+                    token = authorization[BearerPrefix.Length..].Trim();
                 }
 
                 // If no token found, no further work possible
@@ -152,12 +154,14 @@ public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
 
                 var tokenValidatedContext = new TokenValidatedContext(Context, Scheme, Options)
                 {
-                    Principal = principal
+                    Principal = principal,
+                    SecurityToken = validatedToken,
+                    Properties =
+                    {
+                        ExpiresUtc = GetSafeDateTime(validatedToken.ValidTo),
+                        IssuedUtc = GetSafeDateTime(validatedToken.ValidFrom)
+                    },
                 };
-
-                tokenValidatedContext.SecurityToken = validatedToken;
-                tokenValidatedContext.Properties.ExpiresUtc = GetSafeDateTime(validatedToken.ValidTo);
-                tokenValidatedContext.Properties.IssuedUtc = GetSafeDateTime(validatedToken.ValidFrom);
 
                 await Events.TokenValidated(tokenValidatedContext);
                 if (tokenValidatedContext.Result != null)
@@ -167,10 +171,9 @@ public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
 
                 if (Options.SaveToken)
                 {
-                    tokenValidatedContext.Properties.StoreTokens(new[]
-                    {
+                    tokenValidatedContext.Properties.StoreTokens([
                         new AuthenticationToken { Name = "access_token", Value = token }
-                    });
+                    ]);
                 }
 
                 tokenValidatedContext.Success();
@@ -251,9 +254,8 @@ public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
             {
                 // GetConfigurationAsync has a time interval that must pass before new http request will be issued.
                 var configuration = await Options.ConfigurationManager.GetConfigurationAsync(Context.RequestAborted);
-                var issuers = new[] { configuration.Issuer };
-                tokenValidationParameters.ValidIssuers = (tokenValidationParameters.ValidIssuers == null ? issuers : tokenValidationParameters.ValidIssuers.Concat(issuers));
-                tokenValidationParameters.IssuerSigningKeys = (tokenValidationParameters.IssuerSigningKeys == null ? configuration.SigningKeys : tokenValidationParameters.IssuerSigningKeys.Concat(configuration.SigningKeys));
+                tokenValidationParameters.ValidIssuers = tokenValidationParameters.ValidIssuers == null ? [configuration.Issuer] : [.. tokenValidationParameters.ValidIssuers, configuration.Issuer];
+                tokenValidationParameters.IssuerSigningKeys = tokenValidationParameters.IssuerSigningKeys == null ? configuration.SigningKeys : [.. tokenValidationParameters.IssuerSigningKeys, .. configuration.SigningKeys];
             }
         }
 
@@ -306,36 +308,25 @@ public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
             // https://tools.ietf.org/html/rfc6750#section-3.1
             // WWW-Authenticate: Bearer realm="example", error="invalid_token", error_description="The access token expired"
             var builder = new StringBuilder(Options.Challenge);
-            if (Options.Challenge.IndexOf(' ') > 0)
+            if (builder.Length > BearerPrefix.Length)
             {
-                // Only add a comma after the first param, if any
+                // Only add a comma after the first param, if any.
                 builder.Append(',');
             }
             if (!string.IsNullOrEmpty(eventContext.Error))
             {
                 builder.Append(" error=\"");
                 builder.Append(eventContext.Error);
-                builder.Append('\"');
+                builder.Append("\",");
             }
             if (!string.IsNullOrEmpty(eventContext.ErrorDescription))
             {
-                if (!string.IsNullOrEmpty(eventContext.Error))
-                {
-                    builder.Append(',');
-                }
-
                 builder.Append(" error_description=\"");
                 builder.Append(eventContext.ErrorDescription);
-                builder.Append('\"');
+                builder.Append("\",");
             }
             if (!string.IsNullOrEmpty(eventContext.ErrorUri))
             {
-                if (!string.IsNullOrEmpty(eventContext.Error) ||
-                    !string.IsNullOrEmpty(eventContext.ErrorDescription))
-                {
-                    builder.Append(',');
-                }
-
                 builder.Append(" error_uri=\"");
                 builder.Append(eventContext.ErrorUri);
                 builder.Append('\"');
@@ -368,14 +359,14 @@ public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
 
     private static string CreateErrorDescription(Exception authFailure)
     {
-        IReadOnlyCollection<Exception> exceptions;
+        ReadOnlyCollection<Exception> exceptions;
         if (authFailure is AggregateException agEx)
         {
             exceptions = agEx.InnerExceptions;
         }
         else
         {
-            exceptions = new[] { authFailure };
+            exceptions = [authFailure];
         }
 
         var messages = new List<string>(exceptions.Count);
