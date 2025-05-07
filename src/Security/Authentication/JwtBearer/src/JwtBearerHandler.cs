@@ -20,8 +20,6 @@ namespace Microsoft.AspNetCore.Authentication.JwtBearer;
 /// </summary>
 public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
 {
-    private const string BearerPrefix = "Bearer ";
-
     /// <summary>
     /// Initializes a new instance of <see cref="JwtBearerHandler"/>.
     /// </summary>
@@ -83,9 +81,10 @@ public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
                     return AuthenticateResult.NoResult();
                 }
 
-                if (authorization.StartsWith(BearerPrefix, StringComparison.OrdinalIgnoreCase))
+                ReadOnlySpan<char> bearerPrefix = "Bearer ";
+                if (authorization.StartsWith(bearerPrefix, StringComparison.OrdinalIgnoreCase))
                 {
-                    token = authorization[BearerPrefix.Length..].Trim();
+                    token = authorization[bearerPrefix.Length..].Trim();
                 }
 
                 // If no token found, no further work possible
@@ -224,11 +223,8 @@ public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
 
     private void RecordTokenValidationError(Exception exception, List<Exception> exceptions)
     {
-        if (exception != null)
-        {
-            Logger.TokenValidationFailed(exception);
-            exceptions.Add(exception);
-        }
+        Logger.TokenValidationFailed(exception);
+        exceptions.Add(exception);
 
         // Refresh the configuration for exceptions that may be caused by key rollovers. The user can also request a refresh in the event.
         // Refreshing on SecurityTokenSignatureKeyNotFound may be redundant if Last-Known-Good is enabled, it won't do much harm, most likely will be a nop.
@@ -254,8 +250,8 @@ public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
             {
                 // GetConfigurationAsync has a time interval that must pass before new http request will be issued.
                 var configuration = await Options.ConfigurationManager.GetConfigurationAsync(Context.RequestAborted);
-                tokenValidationParameters.ValidIssuers = tokenValidationParameters.ValidIssuers == null ? [configuration.Issuer] : [.. tokenValidationParameters.ValidIssuers, configuration.Issuer];
-                tokenValidationParameters.IssuerSigningKeys = tokenValidationParameters.IssuerSigningKeys == null ? configuration.SigningKeys : [.. tokenValidationParameters.IssuerSigningKeys, .. configuration.SigningKeys];
+                tokenValidationParameters.ValidIssuers = tokenValidationParameters.ValidIssuers == null ? [configuration.Issuer] : tokenValidationParameters.ValidIssuers.Append(configuration.Issuer);
+                tokenValidationParameters.IssuerSigningKeys = tokenValidationParameters.IssuerSigningKeys == null ? configuration.SigningKeys : tokenValidationParameters.IssuerSigningKeys.Concat(configuration.SigningKeys);
             }
         }
 
@@ -297,9 +293,7 @@ public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
 
         Response.StatusCode = 401;
 
-        if (string.IsNullOrEmpty(eventContext.Error) &&
-            string.IsNullOrEmpty(eventContext.ErrorDescription) &&
-            string.IsNullOrEmpty(eventContext.ErrorUri))
+        if (!Options.IncludeErrorDetails)
         {
             Response.Headers.Append(HeaderNames.WWWAuthenticate, Options.Challenge);
         }
@@ -308,9 +302,9 @@ public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
             // https://tools.ietf.org/html/rfc6750#section-3.1
             // WWW-Authenticate: Bearer realm="example", error="invalid_token", error_description="The access token expired"
             var builder = new StringBuilder(Options.Challenge);
-            if (builder.Length > BearerPrefix.Length)
+            if (builder.Length > "Bearer ".Length)
             {
-                // Only add a comma after the first param, if any.
+                // Only add a comma after the first param, if any
                 builder.Append(',');
             }
             if (!string.IsNullOrEmpty(eventContext.Error))
@@ -370,7 +364,6 @@ public class JwtBearerHandler : AuthenticationHandler<JwtBearerOptions>
         }
 
         var messages = new List<string>(exceptions.Count);
-
         foreach (var ex in exceptions)
         {
             // Order sensitive, some of these exceptions derive from others
